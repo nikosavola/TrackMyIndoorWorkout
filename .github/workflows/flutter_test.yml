@@ -28,6 +28,14 @@ jobs:
       - name: Analyze files
         run: flutter analyze .
       - name: Run the tests
-        run: flutter test --dart-define=testing_mode=true
+        run: flutter test --coverage --dart-define=testing_mode=true
+      - name: Upload coverage to Codecov
+        # NOTE: requires a CODECOV_TOKEN secret to be added to the repository settings.
+        # fail_ci_if_error is false so the workflow doesn't hard-fail while that's pending.
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/lcov.info
+          fail_ci_if_error: false
       #- name: Build App Bundle (debug)
       #  run: flutter build appbundle

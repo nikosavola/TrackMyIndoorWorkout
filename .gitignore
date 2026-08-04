@@ -43,3 +43,6 @@ secret.dart
 todo.txt
 NOTWORKING_*
 NORWORKING_*.dart
+
+# Code coverage output
+coverage/

@@ -1,5 +1,7 @@
 # Track My Indoor Workout
 
+[![codecov](https://codecov.io/gh/nikosavola/TrackMyIndoorWorkout/branch/develop/graph/badge.svg)](https://codecov.io/gh/nikosavola/TrackMyIndoorWorkout)
+
 Track My Indoor Workout is an application which supports Bluetooth Low Energy (BLE) enabled
 smart fitness machines to record stationary workouts. Workouts can have GPS routes -
 generated based on speed - and upload to numerous fitness portals. Workouts can be exported in
