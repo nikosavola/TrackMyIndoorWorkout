@@ -22,6 +22,9 @@ build/
 #.vscode/
 .antigravitycli/
 
+# Claude Code session/worktree scratch space
+.claude/
+
 # Flutter/Dart/Pub related
 **/doc/api/
 .dart_tool/
