@@ -1,0 +1,73 @@
+name: Release
+
+# Builds and signs a release Android App Bundle whenever a version tag (e.g.
+# v1.2.3) is pushed, then uploads the .aab as a workflow artifact.
+#
+# NOTE: this workflow requires the following repository secrets, which do
+# NOT exist yet and must be configured by the maintainer under
+# Settings -> Secrets and variables -> Actions before this workflow can
+# succeed:
+#   - ANDROID_KEYSTORE_BASE64: base64-encoded contents of the upload keystore
+#       (.jks) file, e.g. `base64 -w0 upload-keystore.jks`
+#   - ANDROID_KEY_ALIAS: the key alias used when the keystore was created
+#   - ANDROID_KEY_PASSWORD: the password for that key
+#   - ANDROID_STORE_PASSWORD: the password for the keystore itself
+#
+# See the "Release Process" section of README.md for details on generating
+# a keystore and configuring these secrets.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-signed-aab:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.8"
+          channel: "stable"
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Mock Secret File
+        run: cp lib/secret.mock.dart lib/secret.dart
+
+      # Decode the base64-encoded keystore secret into the .jks file that
+      # android/key.properties (written below) points at.
+      - name: Decode keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
+
+      # Write android/key.properties from secrets so
+      # android/app/build.gradle.kts picks up the real release signingConfig
+      # instead of falling back to debug signing.
+      - name: Write key.properties
+        run: |
+          cat > android/key.properties <<EOF
+          storeFile=upload-keystore.jks
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}
+          EOF
+
+      - name: Build signed App Bundle
+        run: flutter build appbundle --release
+
+      - name: Upload App Bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aab
+          path: build/app/outputs/bundle/release/app-release.aab

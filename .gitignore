@@ -43,3 +43,8 @@ secret.dart
 todo.txt
 NOTWORKING_*
 NORWORKING_*.dart
+
+# Release signing (see android/key.properties.example)
+android/key.properties
+*.jks
+*.keystore

@@ -1,0 +1,15 @@
+# Template for android/key.properties, the release signing configuration
+# consumed by android/app/build.gradle.kts.
+#
+# Copy this file to android/key.properties (gitignored, never commit the real
+# file) and fill in the values for your upload keystore. See the "Release
+# Process" section of the project README for how to generate a keystore.
+#
+# If android/key.properties does not exist, the release build type falls
+# back to signing with the debug keys, so `flutter run --release` still
+# works for local development without a real keystore.
+
+keyAlias=upload
+keyPassword=REPLACE_WITH_YOUR_KEY_PASSWORD
+storeFile=upload-keystore.jks
+storePassword=REPLACE_WITH_YOUR_STORE_PASSWORD

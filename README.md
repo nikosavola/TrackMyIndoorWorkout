@@ -77,6 +77,26 @@ It's always good to regen the persistence code after any `isar` version change.
 1. `dart run build_runner build --delete-conflicting-outputs`
 2. Don't forget to re-run `dart format .` after that.
 
+## Release Process
+
+Android release builds are signed via `android/key.properties` (gitignored), loaded by
+`android/app/build.gradle.kts`. Without this file, the `release` build type falls back to the
+debug keys so `flutter run --release` still works for local development.
+
+1. Generate an upload keystore (once):
+   `keytool -genkey -v -keystore upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload`
+2. Copy `android/key.properties.example` to `android/key.properties` and fill in `keyAlias`,
+   `keyPassword`, `storeFile` (path to the `.jks`), and `storePassword`.
+3. Pushing a tag matching `v*` triggers `.github/workflows/release.yml`, which builds a signed
+   `.aab` and uploads it as a workflow artifact. This requires the following repo secrets to be
+   configured under Settings → Secrets and variables → Actions (none exist yet, so the workflow
+   will fail until the maintainer adds them):
+   - `ANDROID_KEYSTORE_BASE64`: `base64 -w0 upload-keystore.jks` output of the keystore file
+   - `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, `ANDROID_STORE_PASSWORD`: matching the keystore
+
+iOS release automation (App Store signing/publishing) is not covered here and remains a separate,
+unaddressed follow-up.
+
 ## License
 
 This work is licensed under Apache 2.0.
