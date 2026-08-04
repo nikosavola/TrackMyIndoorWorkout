@@ -39,6 +39,16 @@ DeepWiki: https://deepwiki.com/TrackMyIndoorWorkout/TrackMyIndoorWorkout/
   and I don't use the `git hack` - `git ship` workflow. I'm avoiding squashing commits because
   I want to preserve detailed commit history to help forensic debugging. But I'm flexible if
   contributions become common and majority wants to change policies.
+* **State management convention:** the app uses [GetX](https://pub.dev/packages/get) purely as a
+  service locator / dependency injection mechanism (`Get.put` / `Get.find`) and for a handful of
+  simple dialogs and navigation helpers - not for its reactive primitives. `.obs` and `Obx(...)`
+  are not used anywhere in `lib/`, and `GetBuilder` appears in exactly two widgets, both wired to
+  the single `GetxController` in the codebase (`FindDevicesController`). Everywhere else, plain
+  `setState()` is the de facto standard for triggering widget rebuilds. Please follow this
+  existing pattern in new code - `setState()` for rebuilds, GetX only for DI/service lookup and
+  simple navigation - rather than introducing a third state-management approach (e.g. `.obs`/`Obx`,
+  `Provider`, `Riverpod`, `Bloc`). The codebase is already inconsistent enough in a few corners;
+  let's not add a fourth way to do the same thing.
 
 ## Extra build quirks
 
