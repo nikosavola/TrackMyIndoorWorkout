@@ -9,16 +9,22 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Setup Java
-        uses: actions/setup-java@v2
+        uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '11'
       - name: Setup Flutter
-        uses: subosito/flutter-action@v1
+        uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          # Pin an exact version instead of floating on channel: 'stable'.
+          # A floating channel silently picks up upstream Flutter/Dart SDK
+          # releases, which can break the build with no warning (see the
+          # IconData `final class` fix in lib/ui/parts/flutter_brand_icons.dart,
+          # caused by exactly this kind of unpinned upgrade).
+          flutter-version: '3.44.8'
+          cache: true
       - name: Install Flutter dependencies
         run: flutter pub get
       - name: Mock Secret File
@@ -29,5 +35,7 @@ jobs:
         run: flutter analyze .
       - name: Run the tests
         run: flutter test --dart-define=testing_mode=true
-      #- name: Build App Bundle (debug)
-      #  run: flutter build appbundle
+      # NOTE: integration_test execution is intentionally not run in CI here
+      # since this runner has no device/emulator available. Tracked separately.
+      - name: Build App Bundle (debug)
+        run: flutter build appbundle --debug
