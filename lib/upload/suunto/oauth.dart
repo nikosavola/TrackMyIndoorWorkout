@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../utils/constants.dart';
+import '../oauth_state.dart';
 import 'constants.dart';
 import 'suunto_token.dart';
 
@@ -18,6 +19,17 @@ import 'suunto_token.dart';
 ///===========================================
 mixin Auth {
   StreamController<String> onCodeReceived = StreamController<String>.broadcast();
+
+  /// HTTP client used for all network calls. Overridable for testing.
+  @visibleForTesting
+  http.Client httpClient = http.Client();
+
+  /// The `state` value generated for the in-flight authorization request.
+  /// Kept in memory only (never persisted) and validated against the
+  /// `state` query parameter of the incoming redirect before the
+  /// authorization `code` is trusted.
+  @visibleForTesting
+  String? oauthState;
 
   Future<void> registerToken(String? token, String? refreshToken, int? expire) async {
     if (Get.isRegistered<SuuntoToken>()) {
@@ -87,8 +99,12 @@ mixin Auth {
   Future<void> _getSuuntoCode(String clientId) async {
     debugPrint('Entering getSuuntoCode');
 
+    oauthState = generateOAuthState();
+
     final encodedRedirectUrl = Uri.encodeQueryComponent(redirectUrl);
-    final params = "?response_type=code&client_id=$clientId&redirect_uri=$encodedRedirectUrl";
+    final params =
+        "?response_type=code&client_id=$clientId&redirect_uri=$encodedRedirectUrl"
+        "&state=$oauthState";
     final oAuth2Url = authorizationEndpoint + params;
 
     debugPrint(oAuth2Url);
@@ -103,27 +119,8 @@ mixin Auth {
     // Attach a listener to the stream
     sub = AppLinks().uriLinkStream.listen(
       (Uri? uri) {
-        if (uri == null) {
-          debugPrint('Subscription was null');
-          sub?.cancel();
-        } else {
-          // Parse the link and warn the user, if it is not correct
-          debugPrint('Got a link!! $uri');
-          if (uri.scheme.compareTo('${redirectUrlScheme}_$clientId') != 0) {
-            debugPrint('This is not the good scheme ${uri.scheme}');
-          }
-          final code = uri.queryParameters["code"] ?? notAvailable;
-          final error = uri.queryParameters["error"];
-
-          debugPrint('code $code, error $error');
-
-          closeInAppWebView();
-          onCodeReceived.add(code);
-
-          debugPrint('Got the new code: $code');
-
-          sub?.cancel();
-        }
+        handleRedirectUri(uri, clientId);
+        sub?.cancel();
       },
       onError: (err) {
         // Handle exception by warning the user their action did not succeed
@@ -131,6 +128,48 @@ mixin Auth {
         sub?.cancel();
       },
     );
+  }
+
+  /// Handles a redirect Uri received on the app's custom URL scheme.
+  ///
+  /// Validates the `state` query parameter against [oauthState] (the value
+  /// generated for the in-flight request) before trusting the `code`.
+  /// A missing or mismatched `state` is treated as an untrustworthy
+  /// redirect (e.g. spoofed by another app registering the same custom
+  /// scheme) and is rejected: no code is forwarded, so the token exchange
+  /// never happens.
+  @visibleForTesting
+  void handleRedirectUri(Uri? uri, String clientId) {
+    if (uri == null) {
+      debugPrint('Subscription was null');
+      return;
+    }
+
+    // Parse the link and warn the user, if it is not correct
+    debugPrint('Got a link!! $uri');
+    if (uri.scheme.compareTo('${redirectUrlScheme}_$clientId') != 0) {
+      debugPrint('This is not the good scheme ${uri.scheme}');
+    }
+
+    final receivedState = uri.queryParameters['state'];
+    if (!isValidOAuthState(oauthState, receivedState)) {
+      debugPrint(
+        'Rejecting OAuth redirect: state mismatch '
+        '(expected: $oauthState, got: $receivedState)',
+      );
+      onCodeReceived.addError(StateError('OAuth state mismatch'));
+      return;
+    }
+
+    final code = uri.queryParameters["code"] ?? notAvailable;
+    final error = uri.queryParameters["error"];
+
+    debugPrint('code $code, error $error');
+
+    closeInAppWebView();
+    onCodeReceived.add(code);
+
+    debugPrint('Got the new code: $code');
   }
 
   Future<bool> hasValidToken() async {
@@ -205,11 +244,26 @@ mixin Auth {
   }
 
   Future<bool> _newAuthorization(String clientId, String secret) async {
+    await _getSuuntoCode(clientId);
+    return completeAuthorization(clientId, secret);
+  }
+
+  /// Waits for the authorization code (or rejection) produced by
+  /// [handleRedirectUri] and, if a code was accepted (i.e. the redirect's
+  /// `state` matched), exchanges it for a token. Exposed for testing so the
+  /// state-validation behaviour can be verified without going through the
+  /// platform's URL-launching / app-links plumbing.
+  @visibleForTesting
+  Future<bool> completeAuthorization(String clientId, String secret) async {
     bool returnValue = false;
 
-    await _getSuuntoCode(clientId);
-
-    final suuntoCode = await onCodeReceived.stream.first;
+    String suuntoCode;
+    try {
+      suuntoCode = await onCodeReceived.stream.first;
+    } catch (error) {
+      debugPrint('Not proceeding to token exchange: $error');
+      return false;
+    }
 
     final answer = await _getSuuntoToken(clientId, secret, suuntoCode);
 
@@ -245,7 +299,7 @@ mixin Auth {
     debugPrint('urlRefresh $tokenRefreshUrl ${suuntoToken.refreshToken}');
 
     final headers = getBasicAuthorizationHeader(clientId, secret);
-    final refreshResponse = await http.post(Uri.parse(tokenRefreshUrl), headers: headers);
+    final refreshResponse = await httpClient.post(Uri.parse(tokenRefreshUrl), headers: headers);
 
     debugPrint('body ${refreshResponse.body}');
     if (refreshResponse.statusCode >= 200 && refreshResponse.statusCode < 300) {
@@ -281,7 +335,7 @@ mixin Auth {
     debugPrint('urlToken $tokenRequestUrl');
 
     final headers = getBasicAuthorizationHeader(clientId, secret);
-    final tokenResponse = await http.post(
+    final tokenResponse = await httpClient.post(
       Uri.parse(tokenRequestUrl),
       headers: headers,
       body: {"grant_type": "authorization_code", "code": code, "redirect_uri": redirectUrl},
@@ -348,7 +402,7 @@ mixin Auth {
 
     debugPrint('request $deAuthorizeUrl');
     bool success = false;
-    final response = await http.post(Uri.parse(deAuthorizeUrl), headers: header);
+    final response = await httpClient.post(Uri.parse(deAuthorizeUrl), headers: header);
     if (response.statusCode >= 200 && response.statusCode < 300) {
       debugPrint('DeAuthorize done');
       debugPrint('response ${response.body}');

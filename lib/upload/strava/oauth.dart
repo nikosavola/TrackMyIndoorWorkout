@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../utils/constants.dart';
+import '../oauth_state.dart';
 import 'constants.dart';
 import 'fault.dart';
 import 'strava_status_code.dart';
@@ -21,6 +22,17 @@ import 'strava_token.dart';
 ///===========================================
 mixin Auth {
   StreamController<String> onCodeReceived = StreamController<String>.broadcast();
+
+  /// HTTP client used for all network calls. Overridable for testing.
+  @visibleForTesting
+  http.Client httpClient = http.Client();
+
+  /// The `state` value generated for the in-flight authorization request.
+  /// Kept in memory only (never persisted) and validated against the
+  /// `state` query parameter of the incoming redirect before the
+  /// authorization `code` is trusted.
+  @visibleForTesting
+  String? oauthState;
 
   Future<void> registerToken(
     String? token,
@@ -110,9 +122,11 @@ mixin Auth {
     debugPrint('Entering getStravaCode');
     String redirectUrl = kIsWeb ? appUrl : redirectUrlMobile;
 
+    oauthState = generateOAuthState();
+
     final params =
         '?client_id=$clientID&redirect_uri=$redirectUrl'
-        '&response_type=code&approval_prompt=$prompt&scope=$scope';
+        '&response_type=code&approval_prompt=$prompt&scope=$scope&state=$oauthState';
 
     final reqAuth = authorizationEndpoint + params;
     debugPrint(reqAuth);
@@ -138,27 +152,8 @@ mixin Auth {
       // Attach a listener to the stream
       sub = AppLinks().uriLinkStream.listen(
         (Uri? uri) {
-          if (uri == null) {
-            debugPrint('Subscription was null');
-            sub?.cancel();
-          } else {
-            // Parse the link and warn the user, if it is not correct
-            debugPrint('Got a link!! $uri');
-            if (uri.scheme.compareTo('${redirectUrlScheme}_$clientID') != 0) {
-              debugPrint('This is not the good scheme ${uri.scheme}');
-            }
-            final code = uri.queryParameters["code"] ?? notAvailable;
-            final error = uri.queryParameters["error"];
-
-            debugPrint('code $code, error $error');
-
-            closeInAppWebView();
-            onCodeReceived.add(code);
-
-            debugPrint('Got the new code: $code');
-
-            sub?.cancel();
-          }
+          handleRedirectUri(uri, clientID);
+          sub?.cancel();
         },
         onError: (err) {
           // Handle exception by warning the user their action did not succeed
@@ -196,6 +191,48 @@ mixin Auth {
     }
     // });
 ***/
+  }
+
+  /// Handles a redirect Uri received on the app's custom URL scheme.
+  ///
+  /// Validates the `state` query parameter against [oauthState] (the value
+  /// generated for the in-flight request) before trusting the `code`.
+  /// A missing or mismatched `state` is treated as an untrustworthy
+  /// redirect (e.g. spoofed by another app registering the same custom
+  /// scheme) and is rejected: no code is forwarded, so the token exchange
+  /// never happens.
+  @visibleForTesting
+  void handleRedirectUri(Uri? uri, String clientID) {
+    if (uri == null) {
+      debugPrint('Subscription was null');
+      return;
+    }
+
+    // Parse the link and warn the user, if it is not correct
+    debugPrint('Got a link!! $uri');
+    if (uri.scheme.compareTo('${redirectUrlScheme}_$clientID') != 0) {
+      debugPrint('This is not the good scheme ${uri.scheme}');
+    }
+
+    final receivedState = uri.queryParameters['state'];
+    if (!isValidOAuthState(oauthState, receivedState)) {
+      debugPrint(
+        'Rejecting OAuth redirect: state mismatch '
+        '(expected: $oauthState, got: $receivedState)',
+      );
+      onCodeReceived.addError(StateError('OAuth state mismatch'));
+      return;
+    }
+
+    final code = uri.queryParameters["code"] ?? notAvailable;
+    final error = uri.queryParameters["error"];
+
+    debugPrint('code $code, error $error');
+
+    closeInAppWebView();
+    onCodeReceived.add(code);
+
+    debugPrint('Got the new code: $code');
   }
 
   Future<bool> hasValidToken() async {
@@ -280,11 +317,26 @@ mixin Auth {
     String scope,
     String prompt,
   ) async {
+    await _getStravaCode(clientID, scope, prompt);
+    return completeAuthorization(clientID, secret, scope);
+  }
+
+  /// Waits for the authorization code (or rejection) produced by
+  /// [handleRedirectUri] and, if a code was accepted (i.e. the redirect's
+  /// `state` matched), exchanges it for a token. Exposed for testing so the
+  /// state-validation behaviour can be verified without going through the
+  /// platform's URL-launching / app-links plumbing.
+  @visibleForTesting
+  Future<bool> completeAuthorization(String clientID, String secret, String scope) async {
     bool returnValue = false;
 
-    await _getStravaCode(clientID, scope, prompt);
-
-    final stravaCode = await onCodeReceived.stream.first;
+    String stravaCode;
+    try {
+      stravaCode = await onCodeReceived.stream.first;
+    } catch (error) {
+      debugPrint('Not proceeding to token exchange: $error');
+      return false;
+    }
 
     final answer = await _getStravaToken(clientID, secret, stravaCode);
 
@@ -320,7 +372,7 @@ mixin Auth {
     debugPrint('Entering getNewAccessToken');
     // debugPrint('urlRefresh $urlRefresh');
 
-    final resp = await http.post(Uri.parse(urlRefresh));
+    final resp = await httpClient.post(Uri.parse(urlRefresh));
 
     debugPrint('body ${resp.body}');
     if (resp.statusCode >= 200 && resp.statusCode < 300) {
@@ -347,7 +399,7 @@ mixin Auth {
 
     debugPrint('urlToken $urlToken');
 
-    final value = await http.post(Uri.parse(urlToken));
+    final value = await httpClient.post(Uri.parse(urlToken));
 
     debugPrint('body ${value.body}');
 
@@ -403,7 +455,7 @@ mixin Auth {
     // If header is not "empty"
     if (header.containsKey('88') == false) {
       debugPrint('request $deauthorizationEndpoint');
-      final rep = await http.post(Uri.parse(deauthorizationEndpoint), headers: header);
+      final rep = await httpClient.post(Uri.parse(deauthorizationEndpoint), headers: header);
       if (rep.statusCode >= 200 && rep.statusCode < 300) {
         debugPrint('DeAuthorize done');
         debugPrint('response ${rep.body}');

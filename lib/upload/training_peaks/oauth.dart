@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../utils/constants.dart';
+import '../oauth_state.dart';
 import 'constants.dart';
 import 'training_peaks_token.dart';
 
@@ -18,6 +19,17 @@ import 'training_peaks_token.dart';
 ///===========================================
 mixin Auth {
   StreamController<String> onCodeReceived = StreamController<String>.broadcast();
+
+  /// HTTP client used for all network calls. Overridable for testing.
+  @visibleForTesting
+  http.Client httpClient = http.Client();
+
+  /// The `state` value generated for the in-flight authorization request.
+  /// Kept in memory only (never persisted) and validated against the
+  /// `state` query parameter of the incoming redirect before the
+  /// authorization `code` is trusted.
+  @visibleForTesting
+  String? oauthState;
 
   String getUrlBase(bool oAuthOrApi) {
     return oAuthOrApi ? tpProductionOAuthUrlBase : tpProductionApiUrlBase;
@@ -110,7 +122,11 @@ mixin Auth {
   Future<void> _getTrainingPeaksCode(String clientId, String scope) async {
     debugPrint('Entering getTrainingPeaksCode');
 
-    final params = '?response_type=code&client_id=$clientId&scope=$scope&redirect_uri=$redirectUrl';
+    oauthState = generateOAuthState();
+
+    final params =
+        '?response_type=code&client_id=$clientId&scope=$scope&redirect_uri=$redirectUrl'
+        '&state=$oauthState';
 
     final reqAuth = getUrlBase(true) + authorizationPath + params;
     debugPrint(reqAuth);
@@ -123,27 +139,8 @@ mixin Auth {
     // Attach a listener to the stream
     sub = AppLinks().uriLinkStream.listen(
       (Uri? uri) {
-        if (uri == null) {
-          debugPrint('Subscription was null');
-          sub?.cancel();
-        } else {
-          // Parse the link and warn the user, if it is not correct
-          debugPrint('Got a link!! $uri');
-          if (uri.scheme.compareTo('${redirectUrlScheme}_$clientId') != 0) {
-            debugPrint('This is not the good scheme ${uri.scheme}');
-          }
-          final code = uri.queryParameters["code"] ?? notAvailable;
-          final error = uri.queryParameters["error"];
-
-          debugPrint('code $code, error $error');
-
-          closeInAppWebView();
-          onCodeReceived.add(code);
-
-          debugPrint('Got the new code: $code');
-
-          sub?.cancel();
-        }
+        handleRedirectUri(uri, clientId);
+        sub?.cancel();
       },
       onError: (err) {
         // Handle exception by warning the user their action did not succeed
@@ -151,6 +148,48 @@ mixin Auth {
         sub?.cancel();
       },
     );
+  }
+
+  /// Handles a redirect Uri received on the app's custom URL scheme.
+  ///
+  /// Validates the `state` query parameter against [oauthState] (the value
+  /// generated for the in-flight request) before trusting the `code`.
+  /// A missing or mismatched `state` is treated as an untrustworthy
+  /// redirect (e.g. spoofed by another app registering the same custom
+  /// scheme) and is rejected: no code is forwarded, so the token exchange
+  /// never happens.
+  @visibleForTesting
+  void handleRedirectUri(Uri? uri, String clientId) {
+    if (uri == null) {
+      debugPrint('Subscription was null');
+      return;
+    }
+
+    // Parse the link and warn the user, if it is not correct
+    debugPrint('Got a link!! $uri');
+    if (uri.scheme.compareTo('${redirectUrlScheme}_$clientId') != 0) {
+      debugPrint('This is not the good scheme ${uri.scheme}');
+    }
+
+    final receivedState = uri.queryParameters['state'];
+    if (!isValidOAuthState(oauthState, receivedState)) {
+      debugPrint(
+        'Rejecting OAuth redirect: state mismatch '
+        '(expected: $oauthState, got: $receivedState)',
+      );
+      onCodeReceived.addError(StateError('OAuth state mismatch'));
+      return;
+    }
+
+    final code = uri.queryParameters["code"] ?? notAvailable;
+    final error = uri.queryParameters["error"];
+
+    debugPrint('code $code, error $error');
+
+    closeInAppWebView();
+    onCodeReceived.add(code);
+
+    debugPrint('Got the new code: $code');
   }
 
   Future<bool> hasValidToken() async {
@@ -227,11 +266,26 @@ mixin Auth {
   }
 
   Future<bool> _newAuthorization(String clientId, String secret, String scope) async {
+    await _getTrainingPeaksCode(clientId, scope);
+    return completeAuthorization(clientId, secret, scope);
+  }
+
+  /// Waits for the authorization code (or rejection) produced by
+  /// [handleRedirectUri] and, if a code was accepted (i.e. the redirect's
+  /// `state` matched), exchanges it for a token. Exposed for testing so the
+  /// state-validation behaviour can be verified without going through the
+  /// platform's URL-launching / app-links plumbing.
+  @visibleForTesting
+  Future<bool> completeAuthorization(String clientId, String secret, String scope) async {
     bool returnValue = false;
 
-    await _getTrainingPeaksCode(clientId, scope);
-
-    final trainingPeaksCode = await onCodeReceived.stream.first;
+    String trainingPeaksCode;
+    try {
+      trainingPeaksCode = await onCodeReceived.stream.first;
+    } catch (error) {
+      debugPrint('Not proceeding to token exchange: $error');
+      return false;
+    }
 
     final answer = await _getTrainingPeaksToken(clientId, secret, trainingPeaksCode);
 
@@ -265,7 +319,7 @@ mixin Auth {
 
     debugPrint('urlRefresh $tokenRefreshUrl $refreshToken');
 
-    final refreshResponse = await http.post(
+    final refreshResponse = await httpClient.post(
       Uri.parse(tokenRefreshUrl),
       headers: {"Accept": "application/json", "Api-Key": clientId},
       body: {
@@ -304,7 +358,7 @@ mixin Auth {
 
     debugPrint('urlToken $tokenRequestUrl');
 
-    final tokenResponse = await http.post(
+    final tokenResponse = await httpClient.post(
       Uri.parse(tokenRequestUrl),
       headers: {"Accept": "application/json", "Api-Key": clientId},
       body: {
@@ -375,7 +429,7 @@ mixin Auth {
     final deAuthorizeUrl = getUrlBase(true) + deauthorizationPath;
 
     debugPrint('request $deAuthorizeUrl');
-    final response = await http.post(Uri.parse(deAuthorizeUrl), headers: header);
+    final response = await httpClient.post(Uri.parse(deAuthorizeUrl), headers: header);
     bool success = false;
     if (response.statusCode >= 200 && response.statusCode < 300) {
       debugPrint('DeAuthorize done');

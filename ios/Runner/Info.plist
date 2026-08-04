@@ -40,15 +40,14 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>We need BT access because it&apos;s a BT App.</string>
+	<string>This app uses Bluetooth to discover and connect to your Bluetooth Low Energy fitness machines (e.g. bikes, treadmills, rowers) and heart rate monitors so it can record your workout data.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>We need BT access because it&apos;s a BT App.</string>
+	<string>This app uses Bluetooth to discover and connect to your Bluetooth Low Energy fitness machines (e.g. bikes, treadmills, rowers) and heart rate monitors so it can record your workout data.</string>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>https</string>
-		<string>http</string>
 		<string>stravaflutter</string>
 		<string>suuntoflutter</string>
 		<string>mapmyfitnessflutter</string>

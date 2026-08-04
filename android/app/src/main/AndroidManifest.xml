@@ -71,6 +71,26 @@
             </intent-filter>
 
             <!-- To get redirect url when using url_launcher   -->
+            <!--
+                 KNOWN LIMITATION: this is a custom URL scheme, not a verified
+                 Android App Link. Android cannot verify that only this app owns
+                 "stravaflutter://" - any other installed app that declares the
+                 same scheme+host in its own intent-filter can also receive (or
+                 spoof) this redirect, and on devices with more than one matching
+                 app the user may even be prompted to choose which app handles it.
+                 This is a platform limitation of custom schemes, not something
+                 fixable from the manifest alone.
+                 Mitigation in place: the OAuth "state" parameter is generated
+                 per authorization attempt and validated on redirect (see
+                 lib/upload/strava/oauth.dart and lib/upload/oauth_state.dart)
+                 so a spoofed/replayed redirect is rejected before any token
+                 exchange happens.
+                 Tracked follow-up: migrate to a verified Android App Link
+                 (autoVerify="true" + a Digital Asset Links file hosted at
+                 /.well-known/assetlinks.json on a domain the maintainer
+                 controls) and the iOS Universal Links equivalent. Out of scope
+                 here since it requires hosting domain-verification files.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -79,6 +99,14 @@
                 <data android:pathPattern="/.*" />
             </intent-filter>
 
+            <!--
+                 KNOWN LIMITATION: same custom-URL-scheme caveat as above for
+                 "suuntoflutter://" - interceptable by any app registering the
+                 same scheme+host. Mitigated by the "state" parameter check in
+                 lib/upload/suunto/oauth.dart. See the Strava intent-filter
+                 comment above for the full explanation and the App Links
+                 follow-up.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -87,6 +115,14 @@
                 <data android:pathPattern="/.*" />
             </intent-filter>
 
+            <!--
+                 KNOWN LIMITATION: same custom-URL-scheme caveat as above for
+                 "mapmyfitnessflutter://" (Under Armour) - interceptable by any
+                 app registering the same scheme+host. Mitigated by the "state"
+                 parameter check in lib/upload/under_armour/oauth.dart. See the
+                 Strava intent-filter comment above for the full explanation and
+                 the App Links follow-up.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -95,6 +131,14 @@
                 <data android:pathPattern="/.*" />
             </intent-filter>
 
+            <!--
+                 KNOWN LIMITATION: same custom-URL-scheme caveat as above for
+                 "trainingpeaksflutter://" - interceptable by any app registering
+                 the same scheme+host. Mitigated by the "state" parameter check
+                 in lib/upload/training_peaks/oauth.dart. See the Strava
+                 intent-filter comment above for the full explanation and the
+                 App Links follow-up.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
