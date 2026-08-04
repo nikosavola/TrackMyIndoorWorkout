@@ -1575,12 +1575,31 @@ class FitnessEquipment extends DeviceBase with PowerSpeedMixin {
     readConfiguration();
     _residueCalories = 0.0;
     _lastPositiveCalories = 0.0;
-    _timer?.cancel();
+    _cancelTimersAndSubscription();
     descriptor?.stopWorkout();
+  }
+
+  /// Cancels and nulls out `_timer`, `_throttleTimer` and `subscription`.
+  ///
+  /// This must be called from both `stopWorkout()` and `detach()` so that
+  /// no timer or stream subscription keeps firing callbacks after the
+  /// device is no longer attached, regardless of which teardown path is
+  /// taken. Cancelling an already-null/cancelled `Timer` or
+  /// `StreamSubscription` is a safe no-op in Dart, so it's safe to call
+  /// this helper from multiple code paths (including repeatedly).
+  void _cancelTimersAndSubscription() {
+    _timer?.cancel();
+    _timer = null;
+    _throttleTimer?.cancel();
+    _throttleTimer = null;
+    subscription?.cancel();
+    subscription = null;
   }
 
   @override
   Future<void> detach() async {
+    _cancelTimersAndSubscription();
+
     for (final sensor in _additionalSensors) {
       await sensor.detach();
     }

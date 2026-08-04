@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -6,6 +7,7 @@ import 'package:get/get.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:track_my_indoor_exercise/devices/device_factory.dart';
 import 'package:track_my_indoor_exercise/devices/gadgets/fitness_equipment.dart';
+import 'package:track_my_indoor_exercise/preferences/ftms_data_threshold.dart';
 import 'package:track_my_indoor_exercise/utils/init_preferences.dart';
 import 'package:track_my_indoor_exercise/utils/bluetooth_adapter.dart';
 
@@ -203,6 +205,64 @@ void main() {
 
         expect(selector, flagLsb + 256 * flagMid + 65536 * flagMsb);
       });
+    });
+  });
+
+  group('detach', () {
+    // Regression test for the timer/subscription leak that caused a crash
+    // when disconnecting a device without stopping the workout first
+    // (see commit 78725f4, "Null check operator used on a null value...
+    // disconnecting cross trainer").
+    test('detach() without stopWorkout() cancels the throttle timer so no '
+        'further callbacks fire after detaching', () async {
+      final mockDevice = MockBluetoothDevice();
+      final mockCharacteristic = MockBluetoothCharacteristic();
+      final streamController = StreamController<List<int>>();
+      addTearDown(streamController.close);
+
+      when(() => mockCharacteristic.lastValueStream).thenAnswer((_) => streamController.stream);
+      when(() => mockCharacteristic.setNotifyValue(any())).thenAnswer((_) async => true);
+
+      final descriptor = DeviceFactory.getSchwinnIcBike();
+      final equipment = FitnessEquipment(descriptor: descriptor, device: mockDevice);
+      equipment.characteristic = mockCharacteristic;
+      equipment.attached = true;
+      equipment.measuring = true;
+
+      var callbackCount = 0;
+      equipment.pumpData((data) {
+        callbackCount++;
+      });
+
+      // Let the stream subscription set up inside pumpData() actually attach.
+      await Future.delayed(Duration.zero);
+
+      // A real Schwinn IC4 FTMS Indoor Bike Data packet (speed, cadence,
+      // power, heart rate) - taken from schwinn_ic4_test.dart. Feeding it
+      // through the real data pipeline causes _startThrottlingTimer() to
+      // arm the (until now leaking) `_throttleTimer`.
+      streamController.add([68, 2, 94, 11, 240, 0, 122, 0, 84]);
+      await Future.delayed(Duration.zero);
+
+      expect(callbackCount, 1);
+
+      // Detach WITHOUT calling stopWorkout() first. Before the fix this left
+      // `_throttleTimer` running even though the device is no longer attached,
+      // so it would keep firing and re-invoking the record handler with the
+      // last buffered (now stale) data indefinitely.
+      await equipment.detach();
+
+      // Wait past the throttle interval with no further inbound data. Before
+      // the fix the still-armed `_throttleTimer` would fire here and
+      // re-invoke the callback with the previously buffered data, even
+      // though detach() had already run and no new data arrived.
+      await Future.delayed(const Duration(milliseconds: ftmsDataThresholdDefault + 300));
+
+      expect(
+        callbackCount,
+        1,
+        reason: 'no callback should fire from a leaked throttle timer after detach()',
+      );
     });
   });
 }
