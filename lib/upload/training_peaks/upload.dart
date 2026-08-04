@@ -38,12 +38,16 @@ mixin Upload {
   /// 201 activity created
   /// 400 problem could be that activity already uploaded
   ///
+  ///
+  /// [client] may be supplied to inject an [http.Client] for testing; when
+  /// omitted a real client is created internally and closed afterwards.
   Future<int> uploadActivity(
     Activity activity,
     List<int> fileContent,
     ActivityExport exporter,
-    String clientId,
-  ) async {
+    String clientId, {
+    http.Client? client,
+  }) async {
     debugPrint('Starting to upload activity');
 
     if (!Get.isRegistered<TrainingPeaksToken>()) {
@@ -82,100 +86,107 @@ mixin Upload {
         '"SetWorkoutPublic": $workoutPublic,'
         '"Type": "${trainingPeaksSport(activity.sport)}"}';
     const uploadUrl = tpProductionApiUrlBase + uploadPath;
-    final uploadResponse = await http.post(
-      Uri.parse(uploadUrl),
-      headers: headers,
-      body: contentString,
-    );
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
+    try {
+      final uploadResponse = await httpClient.post(
+        Uri.parse(uploadUrl),
+        headers: headers,
+        body: contentString,
+      );
 
-    debugPrint('Response: ${uploadResponse.statusCode} ${uploadResponse.reasonPhrase}');
+      debugPrint('Response: ${uploadResponse.statusCode} ${uploadResponse.reasonPhrase}');
 
-    if (uploadResponse.statusCode < 200 || uploadResponse.statusCode >= 300) {
-      // response.statusCode != 202 // the new async endpoint should return 202 and a fileTrackingId
-      debugPrint('Error while uploading the activity');
-    } else {
-      // Upload is processed by the server
-      // now wait for the upload to be finished
-      //----------------------------------------
-      if (!uploadResponse.headers.containsKey("location")) {
-        // Why didn't we get a status check URL?
-        return uploadResponse.statusCode;
-      }
+      if (uploadResponse.statusCode < 200 || uploadResponse.statusCode >= 300) {
+        // response.statusCode != 202 // the new async endpoint should return 202 and a fileTrackingId
+        debugPrint('Error while uploading the activity');
+      } else {
+        // Upload is processed by the server
+        // now wait for the upload to be finished
+        //----------------------------------------
+        if (!uploadResponse.headers.containsKey("location")) {
+          // Why didn't we get a status check URL?
+          return uploadResponse.statusCode;
+        }
 
-      final statusUrl = uploadResponse.headers["location"]!;
-      final fileTrackingUuid = statusUrl.split("/").last;
-      debugPrint('trackingUUID $fileTrackingUuid');
-      if (fileTrackingUuid.isNotEmpty) {
-        activity.markTrainingPeaksUploading(fileTrackingUuid);
-        final database = Get.find<Isar>();
-        database.writeTxnSync(() {
-          database.activitys.putSync(activity);
-        });
+        final statusUrl = uploadResponse.headers["location"]!;
+        final fileTrackingUuid = statusUrl.split("/").last;
+        debugPrint('trackingUUID $fileTrackingUuid');
+        if (fileTrackingUuid.isNotEmpty) {
+          activity.markTrainingPeaksUploading(fileTrackingUuid);
+          final database = Get.find<Isar>();
+          database.writeTxnSync(() {
+            database.activitys.putSync(activity);
+          });
 
-        await Future<void>.delayed(const Duration(milliseconds: 500));
+          await Future<void>.delayed(const Duration(milliseconds: 500));
 
-        final uploadStatusUrl = tpProductionApiUrlBase + uploadStatusPath + fileTrackingUuid;
-        final uri = Uri.parse(uploadStatusUrl);
-        bool processingFinished = false;
-        while (!processingFinished) {
-          final resp = await http.get(uri, headers: headers);
-          debugPrint('Check Status ${resp.statusCode}');
+          final uploadStatusUrl = tpProductionApiUrlBase + uploadStatusPath + fileTrackingUuid;
+          final uri = Uri.parse(uploadStatusUrl);
+          bool processingFinished = false;
+          while (!processingFinished) {
+            final resp = await httpClient.get(uri, headers: headers);
+            debugPrint('Check Status ${resp.statusCode}');
 
-          // Everything is fine the file has been loaded
-          if (resp.statusCode >= 200 && resp.statusCode < 300) {
-            // resp.statusCode == 200
-            debugPrint('Check Body: ${resp.body}');
-          }
+            // Everything is fine the file has been loaded
+            if (resp.statusCode >= 200 && resp.statusCode < 300) {
+              // resp.statusCode == 200
+              debugPrint('Check Body: ${resp.body}');
+            }
 
-          // 404 the temp id does not exist anymore
-          // Activity has been probably already loaded
-          if (resp.statusCode == 404) {
-            debugPrint('---> 404 activity already loaded  ${resp.reasonPhrase}');
-            processingFinished = true;
-          } else {
-            final processingBody = resp.body;
-            const completedTag = '"Completed":';
-            int completedBeginningIndex = processingBody.indexOf(completedTag);
-            if (completedBeginningIndex > 0) {
-              int beginningIndex = completedBeginningIndex + completedTag.length;
-              int completedEndIndex = processingBody.indexOf(',', beginningIndex);
-              if (completedEndIndex > 0) {
-                final completedString = processingBody.substring(beginningIndex, completedEndIndex);
-                final completed = completedString.toLowerCase() == "true";
-                debugPrint('---> Completed  $completed');
-                processingFinished = completed;
-                const statusTag = '"Status":';
-                int statusBeginningIndex = processingBody.indexOf(statusTag);
-                if (statusBeginningIndex > 0) {
-                  beginningIndex = statusBeginningIndex + statusTag.length;
-                  final statusEndIndex = processingBody.indexOf(',', statusBeginningIndex);
-                  if (statusEndIndex > 0) {
-                    final statusString = processingBody.substring(beginningIndex, statusEndIndex);
-                    debugPrint('---> Status  $statusString');
+            // 404 the temp id does not exist anymore
+            // Activity has been probably already loaded
+            if (resp.statusCode == 404) {
+              debugPrint('---> 404 activity already loaded  ${resp.reasonPhrase}');
+              processingFinished = true;
+            } else {
+              final processingBody = resp.body;
+              const completedTag = '"Completed":';
+              int completedBeginningIndex = processingBody.indexOf(completedTag);
+              if (completedBeginningIndex > 0) {
+                int beginningIndex = completedBeginningIndex + completedTag.length;
+                int completedEndIndex = processingBody.indexOf(',', beginningIndex);
+                if (completedEndIndex > 0) {
+                  final completedString = processingBody.substring(
+                    beginningIndex,
+                    completedEndIndex,
+                  );
+                  final completed = completedString.toLowerCase() == "true";
+                  debugPrint('---> Completed  $completed');
+                  processingFinished = completed;
+                  const statusTag = '"Status":';
+                  int statusBeginningIndex = processingBody.indexOf(statusTag);
+                  if (statusBeginningIndex > 0) {
+                    beginningIndex = statusBeginningIndex + statusTag.length;
+                    final statusEndIndex = processingBody.indexOf(',', statusBeginningIndex);
+                    if (statusEndIndex > 0) {
+                      final statusString = processingBody.substring(beginningIndex, statusEndIndex);
+                      debugPrint('---> Status  $statusString');
+                    }
                   }
-                }
 
-                const workoutIdsTag = '"WorkoutIds":[';
-                int workoutBeginningIndex = processingBody.indexOf(workoutIdsTag);
-                if (workoutBeginningIndex > 0) {
-                  beginningIndex = workoutBeginningIndex + workoutIdsTag.length;
-                  int workoutIdsEndIndex = processingBody.indexOf(']', beginningIndex);
-                  if (workoutIdsEndIndex > 0) {
-                    final workoutIdsString = processingBody.substring(
-                      beginningIndex,
-                      workoutIdsEndIndex,
-                    );
-                    debugPrint('---> Workout IDs  $workoutIdsString');
-                    final workoutIds = workoutIdsString
-                        .split(",")
-                        .map((workoutIdString) => int.tryParse(workoutIdString))
-                        .nonNulls
-                        .toList(growable: false);
-                    if (workoutIds.isNotEmpty) {
-                      activity.markTrainingPeaksUploaded(workoutIds.first);
-                      database.writeTxnSync(() {
-                        database.activitys.putSync(activity);
-                      });
+                  const workoutIdsTag = '"WorkoutIds":[';
+                  int workoutBeginningIndex = processingBody.indexOf(workoutIdsTag);
+                  if (workoutBeginningIndex > 0) {
+                    beginningIndex = workoutBeginningIndex + workoutIdsTag.length;
+                    int workoutIdsEndIndex = processingBody.indexOf(']', beginningIndex);
+                    if (workoutIdsEndIndex > 0) {
+                      final workoutIdsString = processingBody.substring(
+                        beginningIndex,
+                        workoutIdsEndIndex,
+                      );
+                      debugPrint('---> Workout IDs  $workoutIdsString');
+                      final workoutIds = workoutIdsString
+                          .split(",")
+                          .map((workoutIdString) => int.tryParse(workoutIdString))
+                          .nonNulls
+                          .toList(growable: false);
+                      if (workoutIds.isNotEmpty) {
+                        activity.markTrainingPeaksUploaded(workoutIds.first);
+                        database.writeTxnSync(() {
+                          database.activitys.putSync(activity);
+                        });
+                      }
                     }
                   }
                 }
@@ -184,8 +195,10 @@ mixin Upload {
           }
         }
       }
-    }
 
-    return uploadResponse.statusCode;
+      return uploadResponse.statusCode;
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
   }
 }

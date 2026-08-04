@@ -171,69 +171,84 @@ mixin Auth {
   /// and is not expired
   ///
   /// return true if no problem in authentication has been found
-  Future<bool> oauth(String clientId, String secret, String scope) async {
+  ///
+  /// [client] may be supplied to inject an [http.Client] for testing; when
+  /// omitted a real client is created internally and closed afterwards.
+  Future<bool> oauth(String clientId, String secret, String scope, {http.Client? client}) async {
     debugPrint('Welcome to Training Peaks OAuth');
     bool isAuthOk = false;
     bool isExpired;
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
 
-    final tokenStored = await _getStoredToken();
-    final token = tokenStored.accessToken;
+    try {
+      final tokenStored = await _getStoredToken();
+      final token = tokenStored.accessToken;
 
-    // Check if the token is not expired
-    isExpired = _isTokenExpired(tokenStored);
-    debugPrint('is token expired? $isExpired');
+      // Check if the token is not expired
+      isExpired = _isTokenExpired(tokenStored);
+      debugPrint('is token expired? $isExpired');
 
-    bool storedBefore = token != null && token.isNotEmpty && token != "null";
-    if (storedBefore) {
-      debugPrint(
-        'token has been stored before! '
-        '${tokenStored.accessToken}  exp. ${tokenStored.expiresAt}',
-      );
-    }
-
-    // Use the refresh token to get a new access token
-    if (isExpired && storedBefore) {
-      RefreshAnswer refreshAnswer = await _getNewAccessToken(
-        clientId,
-        secret,
-        tokenStored.refreshToken ?? "0",
-      );
-      // Update with new values if HTTP status code is 200
-      if (refreshAnswer.statusCode != null &&
-          refreshAnswer.statusCode! >= 200 &&
-          refreshAnswer.statusCode! < 300) {
-        await _saveToken(
-          refreshAnswer.accessToken,
-          refreshAnswer.refreshToken,
-          refreshAnswer.expiresAt,
-          scope,
+      bool storedBefore = token != null && token.isNotEmpty && token != "null";
+      if (storedBefore) {
+        debugPrint(
+          'token has been stored before! '
+          '${tokenStored.accessToken}  exp. ${tokenStored.expiresAt}',
         );
-      } else {
-        debugPrint('Problem doing the refresh process');
-        isAuthOk = false;
       }
-    }
 
-    // Check if the scope has changed
-    if (tokenStored.scope != scope || token == "null" || token == null || token.isEmpty) {
-      // Ask for a new authorization
-      debugPrint('Doing a new authorization');
-      isAuthOk = await _newAuthorization(clientId, secret, scope);
-    } else {
-      isAuthOk = true;
-    }
+      // Use the refresh token to get a new access token
+      if (isExpired && storedBefore) {
+        RefreshAnswer refreshAnswer = await _getNewAccessToken(
+          clientId,
+          secret,
+          tokenStored.refreshToken ?? "0",
+          httpClient,
+        );
+        // Update with new values if HTTP status code is 200
+        if (refreshAnswer.statusCode != null &&
+            refreshAnswer.statusCode! >= 200 &&
+            refreshAnswer.statusCode! < 300) {
+          await _saveToken(
+            refreshAnswer.accessToken,
+            refreshAnswer.refreshToken,
+            refreshAnswer.expiresAt,
+            scope,
+          );
+        } else {
+          debugPrint('Problem doing the refresh process');
+          isAuthOk = false;
+        }
+      }
 
-    return isAuthOk;
+      // Check if the scope has changed
+      if (tokenStored.scope != scope || token == "null" || token == null || token.isEmpty) {
+        // Ask for a new authorization
+        debugPrint('Doing a new authorization');
+        isAuthOk = await _newAuthorization(clientId, secret, scope, httpClient);
+      } else {
+        isAuthOk = true;
+      }
+
+      return isAuthOk;
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
   }
 
-  Future<bool> _newAuthorization(String clientId, String secret, String scope) async {
+  Future<bool> _newAuthorization(
+    String clientId,
+    String secret,
+    String scope,
+    http.Client client,
+  ) async {
     bool returnValue = false;
 
     await _getTrainingPeaksCode(clientId, scope);
 
     final trainingPeaksCode = await onCodeReceived.stream.first;
 
-    final answer = await _getTrainingPeaksToken(clientId, secret, trainingPeaksCode);
+    final answer = await _getTrainingPeaksToken(clientId, secret, trainingPeaksCode, client);
 
     debugPrint('answer ${answer.expiresAt}, ${answer.accessToken}');
 
@@ -256,6 +271,7 @@ mixin Auth {
     String clientId,
     String secret,
     String refreshToken,
+    http.Client client,
   ) async {
     var returnToken = RefreshAnswer();
 
@@ -265,7 +281,7 @@ mixin Auth {
 
     debugPrint('urlRefresh $tokenRefreshUrl $refreshToken');
 
-    final refreshResponse = await http.post(
+    final refreshResponse = await client.post(
       Uri.parse(tokenRefreshUrl),
       headers: {"Accept": "application/json", "Api-Key": clientId},
       body: {
@@ -295,6 +311,7 @@ mixin Auth {
     String clientId,
     String secret,
     String code,
+    http.Client client,
   ) async {
     var answer = TrainingPeaksToken();
 
@@ -304,7 +321,7 @@ mixin Auth {
 
     debugPrint('urlToken $tokenRequestUrl');
 
-    final tokenResponse = await http.post(
+    final tokenResponse = await client.post(
       Uri.parse(tokenRequestUrl),
       headers: {"Accept": "application/json", "Api-Key": clientId},
       body: {
@@ -361,7 +378,7 @@ mixin Auth {
   ///
   ///return codes:
   /// statusOK or statusNoAuthenticationYet
-  Future<bool> deAuthorize() async {
+  Future<bool> deAuthorize({http.Client? client}) async {
     final token = Get.isRegistered<TrainingPeaksToken>()
         ? Get.find<TrainingPeaksToken>()
         : await _getStoredToken();
@@ -375,7 +392,14 @@ mixin Auth {
     final deAuthorizeUrl = getUrlBase(true) + deauthorizationPath;
 
     debugPrint('request $deAuthorizeUrl');
-    final response = await http.post(Uri.parse(deAuthorizeUrl), headers: header);
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
+    http.Response response;
+    try {
+      response = await httpClient.post(Uri.parse(deAuthorizeUrl), headers: header);
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
     bool success = false;
     if (response.statusCode >= 200 && response.statusCode < 300) {
       debugPrint('DeAuthorize done');

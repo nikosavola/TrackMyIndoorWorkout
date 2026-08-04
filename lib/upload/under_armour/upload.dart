@@ -15,12 +15,16 @@ mixin Upload {
   /// 201 activity created
   /// 400 problem could be that activity already uploaded
   ///
+  ///
+  /// [client] may be supplied to inject an [http.Client] for testing; when
+  /// omitted a real client is created internally and closed afterwards.
   Future<int> uploadActivity(
     Activity activity,
     List<int> fileContent,
     ActivityExport exporter,
-    String clientId,
-  ) async {
+    String clientId, {
+    http.Client? client,
+  }) async {
     debugPrint('Starting to upload activity');
 
     if (!Get.isRegistered<UnderArmourToken>()) {
@@ -44,11 +48,18 @@ mixin Upload {
       "Content-Length": fileContent.length.toString(),
     });
 
-    final uploadResponse = await http.post(
-      Uri.parse(uploadsEndpoint),
-      headers: headers,
-      body: fileContent,
-    );
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
+    http.Response uploadResponse;
+    try {
+      uploadResponse = await httpClient.post(
+        Uri.parse(uploadsEndpoint),
+        headers: headers,
+        body: fileContent,
+      );
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
 
     debugPrint('Response: ${uploadResponse.statusCode} ${uploadResponse.reasonPhrase}');
 

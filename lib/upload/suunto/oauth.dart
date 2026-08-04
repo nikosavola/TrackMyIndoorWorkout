@@ -148,70 +148,85 @@ mixin Auth {
   ///
   /// clientId: ID of your Suunto app
   /// secret: Secret of your Suunto app
-  Future<bool> oauth(String clientId, String secret, String subscriptionKey) async {
+  ///
+  /// [client] may be supplied to inject an [http.Client] for testing; when
+  /// omitted a real client is created internally and closed afterwards.
+  Future<bool> oauth(
+    String clientId,
+    String secret,
+    String subscriptionKey, {
+    http.Client? client,
+  }) async {
     debugPrint('Welcome to SUUNTO OAuth');
     bool isAuthOk = false;
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
 
-    final tokenStored = await _getStoredToken();
-    final token = tokenStored.accessToken;
+    try {
+      final tokenStored = await _getStoredToken();
+      final token = tokenStored.accessToken;
 
-    final isExpired = _isTokenExpired(tokenStored);
-    debugPrint('is token expired? $isExpired');
+      final isExpired = _isTokenExpired(tokenStored);
+      debugPrint('is token expired? $isExpired');
 
-    bool storedBefore = token != null && token.isNotEmpty && token != "null";
-    if (storedBefore) {
-      debugPrint(
-        'token has been stored before! '
-        '${tokenStored.accessToken}  exp. ${tokenStored.expiresAt}',
-      );
-    }
-
-    // Use the refresh token to get a new access token
-    if (isExpired && storedBefore) {
-      RefreshAnswer refreshAnswer = await _getNewAccessToken(
-        clientId,
-        secret,
-        tokenStored,
-        subscriptionKey,
-      );
-      // Update with new values if HTTP status code is 200
-      if (refreshAnswer.statusCode != null &&
-          refreshAnswer.statusCode! >= 200 &&
-          refreshAnswer.statusCode! < 300) {
-        await _saveToken(
-          refreshAnswer.accessToken,
-          refreshAnswer.refreshToken,
-          refreshAnswer.expiresAt,
+      bool storedBefore = token != null && token.isNotEmpty && token != "null";
+      if (storedBefore) {
+        debugPrint(
+          'token has been stored before! '
+          '${tokenStored.accessToken}  exp. ${tokenStored.expiresAt}',
         );
-      } else {
-        debugPrint('Problem doing the refresh process');
-        isAuthOk = false;
       }
-    }
 
-    // Check token
-    if (token == "null" || token == null) {
-      debugPrint('Doing a new authorization');
-      isAuthOk = await _newAuthorization(clientId, secret);
-    } else {
-      debugPrint(
-        'token has been stored before! '
-        '${tokenStored.accessToken} exp. ${tokenStored.expiresAt}',
-      );
-      isAuthOk = true;
-    }
+      // Use the refresh token to get a new access token
+      if (isExpired && storedBefore) {
+        RefreshAnswer refreshAnswer = await _getNewAccessToken(
+          clientId,
+          secret,
+          tokenStored,
+          subscriptionKey,
+          httpClient,
+        );
+        // Update with new values if HTTP status code is 200
+        if (refreshAnswer.statusCode != null &&
+            refreshAnswer.statusCode! >= 200 &&
+            refreshAnswer.statusCode! < 300) {
+          await _saveToken(
+            refreshAnswer.accessToken,
+            refreshAnswer.refreshToken,
+            refreshAnswer.expiresAt,
+          );
+        } else {
+          debugPrint('Problem doing the refresh process');
+          isAuthOk = false;
+        }
+      }
 
-    return isAuthOk;
+      // Check token
+      if (token == "null" || token == null) {
+        debugPrint('Doing a new authorization');
+        isAuthOk = await _newAuthorization(clientId, secret, httpClient);
+      } else {
+        debugPrint(
+          'token has been stored before! '
+          '${tokenStored.accessToken} exp. ${tokenStored.expiresAt}',
+        );
+        isAuthOk = true;
+      }
+
+      return isAuthOk;
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
   }
 
-  Future<bool> _newAuthorization(String clientId, String secret) async {
+  Future<bool> _newAuthorization(String clientId, String secret, http.Client client) async {
     bool returnValue = false;
 
     await _getSuuntoCode(clientId);
 
     final suuntoCode = await onCodeReceived.stream.first;
 
-    final answer = await _getSuuntoToken(clientId, secret, suuntoCode);
+    final answer = await _getSuuntoToken(clientId, secret, suuntoCode, client);
 
     debugPrint('answer ${answer.expiresAt}, ${answer.accessToken}');
 
@@ -234,6 +249,7 @@ mixin Auth {
     String secret,
     SuuntoToken suuntoToken,
     String subscriptionKey,
+    http.Client client,
   ) async {
     var returnToken = RefreshAnswer();
 
@@ -245,7 +261,7 @@ mixin Auth {
     debugPrint('urlRefresh $tokenRefreshUrl ${suuntoToken.refreshToken}');
 
     final headers = getBasicAuthorizationHeader(clientId, secret);
-    final refreshResponse = await http.post(Uri.parse(tokenRefreshUrl), headers: headers);
+    final refreshResponse = await client.post(Uri.parse(tokenRefreshUrl), headers: headers);
 
     debugPrint('body ${refreshResponse.body}');
     if (refreshResponse.statusCode >= 200 && refreshResponse.statusCode < 300) {
@@ -271,7 +287,12 @@ mixin Auth {
     return {"Authorization": "Basic $base64String"};
   }
 
-  Future<SuuntoToken> _getSuuntoToken(String clientId, String secret, String code) async {
+  Future<SuuntoToken> _getSuuntoToken(
+    String clientId,
+    String secret,
+    String code,
+    http.Client client,
+  ) async {
     var answer = SuuntoToken();
 
     debugPrint('Entering getSuuntoToken!!');
@@ -281,7 +302,7 @@ mixin Auth {
     debugPrint('urlToken $tokenRequestUrl');
 
     final headers = getBasicAuthorizationHeader(clientId, secret);
-    final tokenResponse = await http.post(
+    final tokenResponse = await client.post(
       Uri.parse(tokenRequestUrl),
       headers: headers,
       body: {"grant_type": "authorization_code", "code": code, "redirect_uri": redirectUrl},
@@ -333,7 +354,7 @@ mixin Auth {
   ///
   ///return codes:
   /// true or false
-  Future<bool> deAuthorize(String clientId, String subscriptionKey) async {
+  Future<bool> deAuthorize(String clientId, String subscriptionKey, {http.Client? client}) async {
     final token = Get.isRegistered<SuuntoToken>()
         ? Get.find<SuuntoToken>()
         : await _getStoredToken();
@@ -348,7 +369,14 @@ mixin Auth {
 
     debugPrint('request $deAuthorizeUrl');
     bool success = false;
-    final response = await http.post(Uri.parse(deAuthorizeUrl), headers: header);
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
+    http.Response response;
+    try {
+      response = await httpClient.post(Uri.parse(deAuthorizeUrl), headers: header);
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
     if (response.statusCode >= 200 && response.statusCode < 300) {
       debugPrint('DeAuthorize done');
       debugPrint('response ${response.body}');

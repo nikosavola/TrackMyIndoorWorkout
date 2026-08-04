@@ -219,59 +219,75 @@ mixin Auth {
   ///
   /// Do/show the Strava login if the scope has been changed since last storage of the token
   /// return true if no problem in authentication has been found
-  Future<bool> oauth(String clientId, String scope, String secret, String prompt) async {
+  ///
+  /// [client] may be supplied to inject an [http.Client] for testing; when
+  /// omitted a real client is created internally and closed afterwards.
+  Future<bool> oauth(
+    String clientId,
+    String scope,
+    String secret,
+    String prompt, {
+    http.Client? client,
+  }) async {
     debugPrint('Welcome to Strava OAuth');
     bool isAuthOk = false;
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
 
-    final tokenStored = await _getStoredToken();
-    final token = tokenStored.accessToken;
+    try {
+      final tokenStored = await _getStoredToken();
+      final token = tokenStored.accessToken;
 
-    // Check if the token is not expired
-    bool isExpired = _isTokenExpired(tokenStored);
-    debugPrint('is token expired? $isExpired');
+      // Check if the token is not expired
+      bool isExpired = _isTokenExpired(tokenStored);
+      debugPrint('is token expired? $isExpired');
 
-    bool storedBefore = token != null && token.isNotEmpty && token != "null";
-    if (storedBefore) {
-      debugPrint(
-        'token has been stored before! '
-        '${tokenStored.accessToken}  exp. ${tokenStored.expiresAt}',
-      );
-    }
-
-    // Use the refresh token to get a new access token
-    if (isExpired && storedBefore) {
-      // token != null || token != "null"
-      RefreshAnswer refreshAnswer = await _getNewAccessToken(
-        clientId,
-        secret,
-        tokenStored.refreshToken ?? "0",
-      );
-      // Update with new values if HTTP status code is 200
-      if (refreshAnswer.fault != null &&
-          refreshAnswer.fault!.statusCode >= 200 &&
-          refreshAnswer.fault!.statusCode < 300) {
-        await _saveToken(
-          refreshAnswer.accessToken,
-          refreshAnswer.refreshToken,
-          refreshAnswer.expiresAt,
-          scope,
+      bool storedBefore = token != null && token.isNotEmpty && token != "null";
+      if (storedBefore) {
+        debugPrint(
+          'token has been stored before! '
+          '${tokenStored.accessToken}  exp. ${tokenStored.expiresAt}',
         );
-      } else {
-        debugPrint('Problem doing the refresh process');
-        isAuthOk = false;
       }
-    }
 
-    // Check if the scope has changed
-    if (tokenStored.scope != scope || token == "null" || token == null || token.isEmpty) {
-      // Ask for a new authorization
-      debugPrint('Doing a new authorization');
-      isAuthOk = await _newAuthorization(clientId, secret, scope, prompt);
-    } else {
-      isAuthOk = true;
-    }
+      // Use the refresh token to get a new access token
+      if (isExpired && storedBefore) {
+        // token != null || token != "null"
+        RefreshAnswer refreshAnswer = await _getNewAccessToken(
+          clientId,
+          secret,
+          tokenStored.refreshToken ?? "0",
+          httpClient,
+        );
+        // Update with new values if HTTP status code is 200
+        if (refreshAnswer.fault != null &&
+            refreshAnswer.fault!.statusCode >= 200 &&
+            refreshAnswer.fault!.statusCode < 300) {
+          await _saveToken(
+            refreshAnswer.accessToken,
+            refreshAnswer.refreshToken,
+            refreshAnswer.expiresAt,
+            scope,
+          );
+        } else {
+          debugPrint('Problem doing the refresh process');
+          isAuthOk = false;
+        }
+      }
 
-    return isAuthOk;
+      // Check if the scope has changed
+      if (tokenStored.scope != scope || token == "null" || token == null || token.isEmpty) {
+        // Ask for a new authorization
+        debugPrint('Doing a new authorization');
+        isAuthOk = await _newAuthorization(clientId, secret, scope, prompt, httpClient);
+      } else {
+        isAuthOk = true;
+      }
+
+      return isAuthOk;
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
   }
 
   Future<bool> _newAuthorization(
@@ -279,6 +295,7 @@ mixin Auth {
     String secret,
     String scope,
     String prompt,
+    http.Client client,
   ) async {
     bool returnValue = false;
 
@@ -286,7 +303,7 @@ mixin Auth {
 
     final stravaCode = await onCodeReceived.stream.first;
 
-    final answer = await _getStravaToken(clientID, secret, stravaCode);
+    final answer = await _getStravaToken(clientID, secret, stravaCode, client);
 
     debugPrint('answer ${answer.expiresAt}, ${answer.accessToken}');
 
@@ -309,6 +326,7 @@ mixin Auth {
     String clientID,
     String secret,
     String refreshToken,
+    http.Client client,
   ) async {
     var returnToken = RefreshAnswer();
 
@@ -320,7 +338,7 @@ mixin Auth {
     debugPrint('Entering getNewAccessToken');
     // debugPrint('urlRefresh $urlRefresh');
 
-    final resp = await http.post(Uri.parse(urlRefresh));
+    final resp = await client.post(Uri.parse(urlRefresh));
 
     debugPrint('body ${resp.body}');
     if (resp.statusCode >= 200 && resp.statusCode < 300) {
@@ -336,7 +354,12 @@ mixin Auth {
     return returnToken;
   }
 
-  Future<StravaToken> _getStravaToken(String clientID, String secret, String code) async {
+  Future<StravaToken> _getStravaToken(
+    String clientID,
+    String secret,
+    String code,
+    http.Client client,
+  ) async {
     var answer = StravaToken();
 
     debugPrint('Entering getStravaToken!!');
@@ -347,7 +370,7 @@ mixin Auth {
 
     debugPrint('urlToken $urlToken');
 
-    final value = await http.post(Uri.parse(urlToken));
+    final value = await client.post(Uri.parse(urlToken));
 
     debugPrint('body ${value.body}');
 
@@ -394,7 +417,7 @@ mixin Auth {
   ///
   ///return codes:
   /// statusOK or statusNoAuthenticationYet
-  Future<Fault> deAuthorize() async {
+  Future<Fault> deAuthorize({http.Client? client}) async {
     final token = Get.isRegistered<StravaToken>()
         ? Get.find<StravaToken>()
         : await _getStoredToken();
@@ -403,7 +426,14 @@ mixin Auth {
     // If header is not "empty"
     if (header.containsKey('88') == false) {
       debugPrint('request $deauthorizationEndpoint');
-      final rep = await http.post(Uri.parse(deauthorizationEndpoint), headers: header);
+      final ownsClient = client == null;
+      final httpClient = client ?? http.Client();
+      http.Response rep;
+      try {
+        rep = await httpClient.post(Uri.parse(deauthorizationEndpoint), headers: header);
+      } finally {
+        if (ownsClient) httpClient.close();
+      }
       if (rep.statusCode >= 200 && rep.statusCode < 300) {
         debugPrint('DeAuthorize done');
         debugPrint('response ${rep.body}');

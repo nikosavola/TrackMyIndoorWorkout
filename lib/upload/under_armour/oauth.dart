@@ -147,71 +147,81 @@ mixin Auth {
   /// and is not expired
   ///
   /// return true if no problem in authentication has been found
-  Future<bool> oauth(String clientId, String secret) async {
+  ///
+  /// [client] may be supplied to inject an [http.Client] for testing; when
+  /// omitted a real client is created internally and closed afterwards.
+  Future<bool> oauth(String clientId, String secret, {http.Client? client}) async {
     debugPrint('Welcome to Under Armour OAuth');
     bool isAuthOk = false;
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
 
-    final tokenStored = await _getStoredToken();
-    final token = tokenStored.accessToken;
+    try {
+      final tokenStored = await _getStoredToken();
+      final token = tokenStored.accessToken;
 
-    // Check if the token is not expired
-    bool isExpired = _isTokenExpired(tokenStored);
-    debugPrint('is token expired? $isExpired');
+      // Check if the token is not expired
+      bool isExpired = _isTokenExpired(tokenStored);
+      debugPrint('is token expired? $isExpired');
 
-    bool storedBefore = token != null && token.isNotEmpty && token != "null";
-    if (storedBefore) {
-      debugPrint(
-        'token has been stored before! '
-        '${tokenStored.accessToken}  exp. ${tokenStored.expiresAt}',
-      );
-    }
-
-    // Use the refresh token to get a new access token
-    if (isExpired && storedBefore) {
-      RefreshAnswer refreshAnswer = await _getNewAccessToken(
-        clientId,
-        secret,
-        tokenStored.refreshToken ?? "0",
-      );
-      // Update with new values if HTTP status code is 200
-      if (refreshAnswer.statusCode != null &&
-          refreshAnswer.statusCode! >= 200 &&
-          refreshAnswer.statusCode! < 300) {
-        await _saveToken(
-          refreshAnswer.accessToken,
-          refreshAnswer.refreshToken,
-          refreshAnswer.expiresAt,
+      bool storedBefore = token != null && token.isNotEmpty && token != "null";
+      if (storedBefore) {
+        debugPrint(
+          'token has been stored before! '
+          '${tokenStored.accessToken}  exp. ${tokenStored.expiresAt}',
         );
-      } else {
-        debugPrint('Problem doing the refresh process');
-        isAuthOk = false;
       }
-    }
 
-    // Check token
-    if (token == "null" || token == null || token.isEmpty) {
-      // Ask for a new authorization
-      debugPrint('Doing a new authorization');
-      isAuthOk = await _newAuthorization(clientId, secret);
-    } else {
-      debugPrint(
-        'token has been stored before! '
-        '${tokenStored.accessToken} exp. ${tokenStored.expiresAt}',
-      );
-      isAuthOk = true;
-    }
+      // Use the refresh token to get a new access token
+      if (isExpired && storedBefore) {
+        RefreshAnswer refreshAnswer = await _getNewAccessToken(
+          clientId,
+          secret,
+          tokenStored.refreshToken ?? "0",
+          httpClient,
+        );
+        // Update with new values if HTTP status code is 200
+        if (refreshAnswer.statusCode != null &&
+            refreshAnswer.statusCode! >= 200 &&
+            refreshAnswer.statusCode! < 300) {
+          await _saveToken(
+            refreshAnswer.accessToken,
+            refreshAnswer.refreshToken,
+            refreshAnswer.expiresAt,
+          );
+        } else {
+          debugPrint('Problem doing the refresh process');
+          isAuthOk = false;
+        }
+      }
 
-    return isAuthOk;
+      // Check token
+      if (token == "null" || token == null || token.isEmpty) {
+        // Ask for a new authorization
+        debugPrint('Doing a new authorization');
+        isAuthOk = await _newAuthorization(clientId, secret, httpClient);
+      } else {
+        debugPrint(
+          'token has been stored before! '
+          '${tokenStored.accessToken} exp. ${tokenStored.expiresAt}',
+        );
+        isAuthOk = true;
+      }
+
+      return isAuthOk;
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
   }
 
-  Future<bool> _newAuthorization(String clientId, String secret) async {
+  Future<bool> _newAuthorization(String clientId, String secret, http.Client client) async {
     bool returnValue = false;
 
     await _getUnderArmourCode(clientId);
 
     final underArmourCode = await onCodeReceived.stream.first;
 
-    final answer = await _getUnderArmourToken(clientId, secret, underArmourCode);
+    final answer = await _getUnderArmourToken(clientId, secret, underArmourCode, client);
 
     debugPrint('answer ${answer.expiresAt}, ${answer.accessToken}');
 
@@ -233,13 +243,14 @@ mixin Auth {
     String clientId,
     String secret,
     String refreshToken,
+    http.Client client,
   ) async {
     var returnToken = RefreshAnswer();
 
     debugPrint('Entering getNewAccessToken');
     debugPrint('urlRefresh $tokenEndpoint $refreshToken');
 
-    final refreshResponse = await http.post(
+    final refreshResponse = await client.post(
       Uri.parse(tokenEndpoint),
       headers: {"Accept": "application/json", "Api-Key": clientId},
       body: {
@@ -265,13 +276,18 @@ mixin Auth {
     return returnToken;
   }
 
-  Future<UnderArmourToken> _getUnderArmourToken(String clientId, String secret, String code) async {
+  Future<UnderArmourToken> _getUnderArmourToken(
+    String clientId,
+    String secret,
+    String code,
+    http.Client client,
+  ) async {
     var answer = UnderArmourToken();
 
     debugPrint('Entering getUnderArmourToken!!');
     debugPrint('urlToken $tokenEndpoint');
 
-    final tokenResponse = await http.post(
+    final tokenResponse = await client.post(
       Uri.parse(tokenEndpoint),
       headers: {"Accept": "application/json", "Api-Key": clientId},
       body: {

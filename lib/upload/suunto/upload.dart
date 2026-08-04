@@ -21,11 +21,15 @@ mixin Upload {
   /// 201 activity created
   /// 400 problem could be that activity already uploaded
   ///
+  ///
+  /// [client] may be supplied to inject an [http.Client] for testing; when
+  /// omitted a real client is created internally and closed afterwards.
   Future<int> uploadActivity(
     Activity activity,
     List<int> fileContent,
-    ActivityExport exporter,
-  ) async {
+    ActivityExport exporter, {
+    http.Client? client,
+  }) async {
     debugPrint('Starting to upload activity');
 
     if (!Get.isRegistered<SuuntoToken>()) {
@@ -47,90 +51,107 @@ mixin Upload {
 
     headers.addAll({"Accept": "application/json", "Content-Type": "application/json"});
 
-    if (activity.suuntoBlobUrl.isNotEmpty && activity.suuntoUploadIdentifier.isNotEmpty) {
-      return await checkStatus(headers, activity);
-    }
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
+    try {
+      if (activity.suuntoBlobUrl.isNotEmpty && activity.suuntoUploadIdentifier.isNotEmpty) {
+        return await checkStatus(headers, activity, client: httpClient);
+      }
 
-    final postUri = Uri.parse(uploadsEndpoint);
-    final uploadInitResponse = await http.post(
-      postUri,
-      headers: headers,
-      body:
-          '{"description": "${activity.getDescription(true)}", '
-          '"comment": "${activity.getTitle(true)}"}',
-    );
+      final postUri = Uri.parse(uploadsEndpoint);
+      final uploadInitResponse = await httpClient.post(
+        postUri,
+        headers: headers,
+        body:
+            '{"description": "${activity.getDescription(true)}", '
+            '"comment": "${activity.getTitle(true)}"}',
+      );
 
-    // https://apizone.suunto.com/how-to-workout-upload
-    final initResponse = uploadInitResponse.body;
-    debugPrint('initResponse: $initResponse');
-    String uploadId = "";
-    String blobUrl = "";
+      // https://apizone.suunto.com/how-to-workout-upload
+      final initResponse = uploadInitResponse.body;
+      debugPrint('initResponse: $initResponse');
+      String uploadId = "";
+      String blobUrl = "";
 
-    if (uploadInitResponse.statusCode < 200 || uploadInitResponse.statusCode >= 300) {
-      debugPrint('Error while initializing upload');
-      return uploadInitResponse.statusCode;
-    } else {
-      const idPrefixPart = '"id":"';
-      int matchBeginningIndex = initResponse.indexOf(idPrefixPart);
-      int idEndIndex = -1;
-      if (matchBeginningIndex > 0) {
-        final idBeginningIndex = matchBeginningIndex + idPrefixPart.length;
-        idEndIndex = initResponse.indexOf('"', idBeginningIndex);
-        if (idEndIndex > 0) {
-          uploadId = initResponse.substring(idBeginningIndex, idEndIndex);
-          debugPrint('uploadId: $uploadId');
+      if (uploadInitResponse.statusCode < 200 || uploadInitResponse.statusCode >= 300) {
+        debugPrint('Error while initializing upload');
+        return uploadInitResponse.statusCode;
+      } else {
+        const idPrefixPart = '"id":"';
+        int matchBeginningIndex = initResponse.indexOf(idPrefixPart);
+        int idEndIndex = -1;
+        if (matchBeginningIndex > 0) {
+          final idBeginningIndex = matchBeginningIndex + idPrefixPart.length;
+          idEndIndex = initResponse.indexOf('"', idBeginningIndex);
+          if (idEndIndex > 0) {
+            uploadId = initResponse.substring(idBeginningIndex, idEndIndex);
+            debugPrint('uploadId: $uploadId');
+          }
+        }
+
+        const blobPrefixPart = '"url":"';
+        matchBeginningIndex = initResponse.indexOf(blobPrefixPart, idEndIndex);
+        if (matchBeginningIndex > 0) {
+          final blobBeginningIndex = matchBeginningIndex + blobPrefixPart.length;
+          final blobEndIndex = initResponse.indexOf('"', blobBeginningIndex);
+          if (blobEndIndex > 0) {
+            blobUrl = initResponse.substring(blobBeginningIndex, blobEndIndex);
+            debugPrint('blobUrl: $blobUrl');
+          }
+        }
+
+        if (uploadId.isEmpty || blobUrl.isEmpty) {
+          return 0;
         }
       }
 
-      const blobPrefixPart = '"url":"';
-      matchBeginningIndex = initResponse.indexOf(blobPrefixPart, idEndIndex);
-      if (matchBeginningIndex > 0) {
-        final blobBeginningIndex = matchBeginningIndex + blobPrefixPart.length;
-        final blobEndIndex = initResponse.indexOf('"', blobBeginningIndex);
-        if (blobEndIndex > 0) {
-          blobUrl = initResponse.substring(blobBeginningIndex, blobEndIndex);
-          debugPrint('blobUrl: $blobUrl');
-        }
+      activity.suuntoUploadInitiated(uploadId, blobUrl);
+      final database = Get.find<Isar>();
+      database.writeTxnSync(() {
+        database.activitys.putSync(activity);
+      });
+
+      final putUri = Uri.parse(blobUrl);
+
+      final uploadBlobResponse = await httpClient.put(
+        putUri,
+        headers: {"x-ms-blob-type": "BlockBlob", "Content-Type": "application/vnd.ant.fit"},
+        body: fileContent,
+      );
+
+      if (uploadBlobResponse.statusCode < 200 || uploadBlobResponse.statusCode >= 300) {
+        debugPrint('Error while uploading the workout');
+      } else {
+        debugPrint('$uploadBlobResponse');
+
+        return await checkStatus(headers, activity, client: httpClient);
       }
 
-      if (uploadId.isEmpty || blobUrl.isEmpty) {
-        return 0;
-      }
+      return uploadBlobResponse.statusCode;
+    } finally {
+      if (ownsClient) httpClient.close();
     }
-
-    activity.suuntoUploadInitiated(uploadId, blobUrl);
-    final database = Get.find<Isar>();
-    database.writeTxnSync(() {
-      database.activitys.putSync(activity);
-    });
-
-    final putUri = Uri.parse(blobUrl);
-
-    final uploadBlobResponse = await http.put(
-      putUri,
-      headers: {"x-ms-blob-type": "BlockBlob", "Content-Type": "application/vnd.ant.fit"},
-      body: fileContent,
-    );
-
-    if (uploadBlobResponse.statusCode < 200 || uploadBlobResponse.statusCode >= 300) {
-      debugPrint('Error while uploading the workout');
-    } else {
-      debugPrint('$uploadBlobResponse');
-
-      return await checkStatus(headers, activity);
-    }
-
-    return uploadBlobResponse.statusCode;
   }
 
-  Future<int> checkStatus(Map<String, String> headers, Activity activity) async {
+  Future<int> checkStatus(
+    Map<String, String> headers,
+    Activity activity, {
+    http.Client? client,
+  }) async {
     if (activity.suuntoWorkoutUrl.isNotEmpty) {
       return 200;
     }
 
     final statusUri = Uri.parse("$uploadsEndpoint/${activity.suuntoUploadIdentifier}");
 
-    final uploadStatusResponse = await http.get(statusUri, headers: headers);
+    final ownsClient = client == null;
+    final httpClient = client ?? http.Client();
+    http.Response uploadStatusResponse;
+    try {
+      uploadStatusResponse = await httpClient.get(statusUri, headers: headers);
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
 
     if (uploadStatusResponse.statusCode < 200 || uploadStatusResponse.statusCode >= 300) {
       debugPrint('Error while getting upload status');
