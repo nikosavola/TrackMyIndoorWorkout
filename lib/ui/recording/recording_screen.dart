@@ -375,8 +375,19 @@ class RecordingState extends State<RecordingScreen> {
           (workoutState == WorkoutState.moving ||
               workoutState == WorkoutState.startedMoving ||
               workoutState == WorkoutState.justPaused)) {
-        _database.writeTxnSync(() {
-          _database.records.putSync(record);
+        // Async write instead of writeTxnSync: this keeps the Isar commit
+        // off the UI thread instead of blocking it for the duration of the
+        // transaction, while still writing every sample (no batching).
+        // Nothing below reads back an auto-generated id from `record`, so
+        // there's no ordering hazard in awaiting the write before
+        // continuing - we still write-then-setState in the same relative
+        // order as before, just without blocking synchronously while the
+        // transaction commits. `_recordHandlerFunction` is itself already
+        // invoked fire-and-forget (its Future isn't awaited by its
+        // caller), so awaiting here doesn't introduce new blocking on the
+        // stream/timer callback that drives it.
+        await _database.writeTxn(() async {
+          await _database.records.put(record);
         });
       }
 

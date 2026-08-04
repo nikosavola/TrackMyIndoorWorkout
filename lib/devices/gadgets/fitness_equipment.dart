@@ -1036,12 +1036,32 @@ class FitnessEquipment extends DeviceBase with PowerSpeedMixin {
 
         // Null activity should only happen in UX simulation mode
         if (_activity != null && !uxDebug) {
+          // Mutate the in-memory field synchronously so any code reading
+          // `_activity.start` right after sees the update immediately;
+          // only the DB persistence itself is pushed to the async path.
           _activity!.start = now;
           if (Get.isRegistered<Isar>()) {
             final database = Get.find<Isar>();
-            database.writeTxnSync(() {
-              database.activitys.putSync(_activity!);
-            });
+            // Async write instead of writeTxnSync: `processRecord` is a
+            // synchronous function invoked straight from a stream
+            // callback / throttling timer, so it can't await here
+            // without becoming async and rippling that through its
+            // callers. That's unnecessary though: `_activity.id` was
+            // already assigned earlier (either when the activity was
+            // first inserted in `_startMeasurement`, or when a
+            // continued activity was loaded from the DB), so nothing
+            // downstream - here or in later processRecord calls - reads
+            // an id produced by this particular write. We only persist
+            // the updated `start` timestamp, so firing the async
+            // writeTxn without awaiting it keeps this thread unblocked
+            // while Isar still commits every one of these writes (Isar
+            // serializes write transactions per instance, so this can't
+            // race with other writes on the same database).
+            unawaited(
+              database.writeTxn(() async {
+                await database.activitys.put(_activity!);
+              }),
+            );
           }
         }
       }
